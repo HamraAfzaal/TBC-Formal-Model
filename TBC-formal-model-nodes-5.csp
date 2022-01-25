@@ -1,0 +1,718 @@
+﻿#import "PAT.Lib.TBC-2";
+
+#define u 2;
+
+TBCConsensus() = IntroduceNodes(); CreateTransactions(); LVSelection(); TransactionsVoting(u); ProposeAndBroadcast(); BlockVoting(); CheckValidity(); BlockAddition(); AssigningBRewardandIncTrust();  NextRound();
+
+#define maximumDeposit 100; 
+#define minimumDeposit 10;
+#define minNumActivities 0;
+#define maxNumActivities 100;
+var<BManagementNodes> bManagementNodes;
+var<WorkerNode> workerNode;
+var<WorkerNodes> workerNodes;
+var<RequesterNode> requesterNode;
+var<RequesterNodes> requesterNodes;
+var<ValidatorNodes> validatorNodes;
+
+IntroduceNodes() = AddManagementNode(0, 20, 1, 0, 0); AddManagementNode(1, 30, 1, 0, 0); AddWorkerNode(2, 10, 1, 0, 0); AddWorkerNode(3, 40, 1, 0, 0); AddRequesterNode(4, 50, 0); 
+
+AddManagementNode(midentifier, mdeposit, mNumActivities, mNumFailure, mWaitingTime) = 
+			[midentifier >= 0 && mdeposit >=  minimumDeposit && mdeposit <= maximumDeposit && mNumFailure == 0 && mWaitingTime == 0]
+					addm {var m = new BManagementNode(midentifier, mdeposit, mNumActivities, mNumFailure, mWaitingTime);
+					bManagementNodes.Add(m);
+					validatorNodes.AddNode(new ValidatorNode(midentifier, mdeposit, mNumActivities, mNumFailure, mWaitingTime, m));
+					} -> Skip;
+
+AddWorkerNode(widentifier, wdeposit, wNumActivities, wNumFailure, wWaitingTime) = 
+			[widentifier >= 0 && wdeposit >=  minimumDeposit && wdeposit <= maximumDeposit && wNumFailure == 0 && wWaitingTime == 0]
+					addw {var w = new WorkerNode(widentifier, wdeposit, wNumActivities, wNumFailure, wWaitingTime);
+					workerNodes.Add(w);
+					validatorNodes.AddNode(new ValidatorNode(widentifier, wdeposit, wNumActivities, wNumFailure, wWaitingTime, w));
+					} -> Skip;
+					
+AddRequesterNode(ridentifier, rdeposit, rNumActivities) = 
+			[ridentifier >= 0 && rdeposit >=  minimumDeposit && rdeposit <= maximumDeposit]
+					addr {var r = new RequesterNode(ridentifier, rdeposit, rNumActivities);
+					requesterNodes.Add(r);
+					} -> Skip;
+					
+var<Transactions> pTransactions;
+var<Transaction> tr;
+var rEscrow;
+var<Blockchain> bchain;
+#define shares 3;
+
+var not_post; var posted; var performed; var evaluated;
+//             0         1      2          3
+var status = [not_post, posted, performed, evaluated];
+var task_status = status[0];
+
+CreateTransactions() = [task_status == status[0]] post_task -> RDeposit(requesterNode.GetRDeposit()); ChangeStatus(status[1]); AddTransaction(tr) []
+					   [task_status == status[1]] perform_task -> ChangeStatus(status[2]); AddTransaction(tr) []
+					   [task_status == status[2]] evaluate_task -> ChangeStatus(status[3]); RemoveEscrow(rEscrow/shares); ReceiveDeposit(rEscrow/shares); AddTransaction(tr);
+												
+ChangeStatus(st) = change {task_status = st} -> Skip;  
+RDeposit(deposit) = adddep {rEscrow = requesterNode.SubmitRDeposit(deposit); bchain.SetEAmount(rEscrow)} -> Skip;
+AddTransaction(x) = addtr{pTransactions.Add(x)} -> Skip;					
+RemoveEscrow(deposit) = reme {bchain.RemoveEAmount(deposit)} -> Skip;
+ReceiveDeposit(deposit) = getdep {workerNode.AddDeposit(deposit)} -> Skip;
+
+#define R 3;
+LVSelection() =  [bManagementNodes.GetLength() > 0 && validatorNodes.GetLength() > 0] 
+				 (SelectLeader() || SelectValidators(R));
+
+var<BManagementNode> bm1;
+var<BManagementNode> bm2;
+var<BManagementNode> tempLeader;
+var<BManagementNode> leader;
+var lSelected = false;
+var round = 0;
+var lEscrow;
+
+SelectLeader() = selectLeader.round{
+					var i = 0;
+					bm1 = bManagementNodes.GetNode(i);
+					tempLeader = bm1;
+					bm1.IncNumParticipation(1);
+					while(i < bManagementNodes.GetLength()-1) {
+						bm2 = bManagementNodes.GetNode(i+1);
+						bm2.IncNumParticipation(1);
+						var depRatio1 = tempLeader.GetMDeposit()/bManagementNodes.GetTotalDeposit();
+						var actRate1 = tempLeader.GetNumBProposed()/bManagementNodes.GetTNumBGAttempts();
+						var failureRate1 = tempLeader.GetNumFailures()/tempLeader.GetNumBGAttempts(); 
+						var waitingRate1 = tempLeader.GetWaitingTime()/tempLeader.GetNumParticipation();
+						
+						var depRatio2 = bm2.GetMDeposit()/bManagementNodes.GetTotalDeposit();
+						var actRate2 = bm2.GetNumBProposed()/bManagementNodes.GetTNumBGAttempts();
+						var failureRate2 = bm2.GetNumFailures()/bm2.GetNumBGAttempts();
+						var waitingRate2 = bm2.GetWaitingTime()/bm2.GetNumParticipation();
+						
+						if (((depRatio1 + actRate1 + failureRate1 + waitingRate1)/4) >      
+        		   			((depRatio2 + actRate2 + failureRate2 + waitingRate2)/4)){
+        		   				i = i+1;
+						}
+						else if (((depRatio1 + actRate1 + failureRate1 + waitingRate1)/4) <      
+        		   			((depRatio2 + actRate2 + failureRate2 + waitingRate2)/4)){
+								tempLeader = bm2;
+								i = i+1;
+						}
+						else if (((depRatio1 + actRate1 + failureRate1 + waitingRate1)/4) ==      
+        		   			((depRatio2 + actRate2 + failureRate2 + waitingRate2)/4)){
+								if ((tempLeader.calculateITHash(tempLeader.GetMIdentifier(), depRatio1 + actRate1 + failureRate1 + waitingRate1)) > 
+									(bm2.calculateITHash(bm2.GetMIdentifier(), depRatio2 + actRate2 + failureRate2 + waitingRate2))) {
+        		   					tempLeader = bm2;
+									i = i+1;	
+        		   				}
+        		   				else {
+        		   					i = i+1;
+        		   				}
+						}
+						
+					}
+					leader = tempLeader;
+					lSelected = true;
+					leader.SetRound(round);
+					lEscrow = leader.SubmitMDeposit(leader.GetMDeposit());
+					bchain.SetEAmount(lEscrow);
+					leader.SetMDeposit(0);
+					} -> Skip;
+
+var<ValidatorNode> v1;
+var<ValidatorNode> v2;
+var<ValidatorNodes> tempValidators;
+var<ValidatorNodes> tValidators;
+var<ValidatorNode> tv;
+var vEscrow;
+var vSelected = false;
+
+SelectValidators(r) = selectrval{
+					tempValidators = validatorNodes;
+					var i1 = 1;
+					while(i1 < tempValidators.GetLength()) {
+						v1 = tempValidators.GetNode(i1);
+						var i2 = i1 - 1;
+							v2 = tempValidators.GetNode(i2);
+					    	v1.IncNumParticipation(1);
+							v2.IncNumParticipation(1);
+							while (((v1.GetVDeposit()/tempValidators.GetTotalDeposit() + 
+									v1.GetNumBValidated()/tempValidators.GetTNumBVAttempts() + 
+									v1.GetNumFailures()/v1.GetNumBVAttempts() + 
+									v1.GetWaitingTime()/v1.GetNumParticipation())/4) >=
+        		   				   ((v2.GetVDeposit()/tempValidators.GetTotalDeposit() + 
+        		   				   	v2.GetNumBValidated()/tempValidators.GetTNumBVAttempts() + 
+        		   				   	v2.GetNumFailures()/v2.GetNumBVAttempts() + 
+        		   				   	v2.GetWaitingTime()/v2.GetNumParticipation())/4) && i2 >= 0){
+                    				tempValidators.SetNode(i2 + 1, v2); 
+                    				i2--;
+                    				if (i2 >= 0)
+                    					v2 = tempValidators.GetNode(i2);
+                			}  
+                			tempValidators.SetNode(i2 + 1, v1); 
+                			i1++;
+					}
+					var i = 0;
+					while(i < tempValidators.GetLength() && i < r){
+						tv = tempValidators.GetNode(i);
+						vEscrow = tv.SubmitVDeposit(tv.GetVDeposit());
+					    bchain.SetEAmount(vEscrow);
+					    tv.SetVDeposit(0);
+						tValidators.AddNode(tv);
+						i++;
+					}
+					if (tValidators.GetLength() == r){
+					vSelected = true;
+					}
+					
+					else {
+					vSelected = false;
+					}
+} -> Skip;
+
+#define maxTrans 100;
+
+TransactionsVoting(s) = [s > 0 && s <= maxTrans] ([lSelected == true && vSelected == true] selection_end -> TVoting(s); HighestVotedTrans(s) [] 
+										   [lSelected == false || vSelected == false] cannot_select_trans -> Skip) []
+						[s < 0] error -> Skip;
+
+var<Transaction> tr1;
+var<Transaction> tr2;
+var<Transactions> tTransactions;
+channel a01 1;
+channel a02 1;
+channel a03 1;
+channel a04 1;
+
+channel a10 1;
+channel a12 1;
+channel a13 1;
+channel a14 1;
+
+channel a20 1;
+channel a21 1;
+channel a23 1;
+channel a24 1;
+
+channel a30 1;
+channel a31 1;
+channel a32 1;	
+channel a34 1;
+
+channel a40 1;
+channel a41 1;
+channel a42 1;	
+channel a43 1;
+
+TVoting(s) = tvote.s {
+					var i1 = 0;
+					while(i1 < tValidators.GetLength()) {
+						tv = tValidators.GetNode(i1);
+					var i2 = 0;
+					while(i2 < pTransactions.GetLength() && i2 < s) {
+						tr = pTransactions.Get(pTransactions.RandomNumber(i2, pTransactions.GetLength()-1));
+						tr.IncTVotes(1);
+						i2++;
+					}
+					i1++;
+					}
+				} -> Skip;
+				
+var<Transactions> tempLTransactions;
+var<Transactions> highestVTransactions;
+var<Blocks> lockedBlocks;
+var transSelected = false;
+
+HighestVotedTrans(s) = htrans.s {	
+		tempLTransactions = pTransactions; 
+		var i1 = 1;
+		while(i1 < tempLTransactions.GetLength()) {
+			tr1 = tempLTransactions.Get(i1);
+			var i2 = i1 - 1;
+			tr2 = tempLTransactions.Get(i2);
+			while(tr1.GetTVotes() >= tr2.GetTVotes() && i2 >= 0){
+				tempLTransactions.Set(i2 + 1, tr2);
+				i2--;
+				if (i2 >= 0)
+					tr2 = tempLTransactions.Get(i2);
+			}
+			tempLTransactions.Set(i2 + 1, tr1);
+			i1++;
+		}
+		var i = 0;
+		while(i < tempLTransactions.GetLength() && i < s){
+			tr = tempLTransactions.Get(i);
+			highestVTransactions.Add(tr);
+			i++;
+		}
+		transSelected = true;
+	} -> Skip;
+
+var<Block> proposedBlock;
+var<Block> previousBlock;
+var<PendingBlocks> pendingBlocks;
+#define initialHash -1;
+var <PendingBlock> pendingBlock;
+var lMalBehavior = false;
+var blockIndex = 0;
+
+ProposeAndBroadcast() = [transSelected == true] tvoting_end ->
+	proposeBroadcast.round {
+		previousBlock = bchain.GetHeadBlock();
+		proposedBlock = new Block(blockIndex, leader, previousBlock.GetBlockHash(), highestVTransactions);
+		pendingBlocks.SetPBlock(blockIndex, new PendingBlock(proposedBlock, new BSig(blockIndex)));
+		leader.IncNumBGAttempts(1);
+	} -> ((
+	[leaderNum == 0] (a01!pendingBlocks.GetPBlock(round) -> Skip || a02!pendingBlocks.GetPBlock(round) -> Skip || a03!pendingBlocks.GetPBlock(round) -> Skip || a04!pendingBlocks.GetPBlock(round) -> Skip) []	//broadcast to other nodes
+	[leaderNum == 1] (a10!pendingBlocks.GetPBlock(round) -> Skip || a12!pendingBlocks.GetPBlock(round) -> Skip || a13!pendingBlocks.GetPBlock(round) -> Skip || a14!pendingBlocks.GetPBlock(round) -> Skip) []
+	[leaderNum == 2] (a20!pendingBlocks.GetPBlock(round) -> Skip || a21!pendingBlocks.GetPBlock(round) -> Skip || a23!pendingBlocks.GetPBlock(round) -> Skip || a24!pendingBlocks.GetPBlock(round) -> Skip) []
+	[leaderNum == 3] (a30!pendingBlocks.GetPBlock(round) -> Skip || a31!pendingBlocks.GetPBlock(round) -> Skip || a32!pendingBlocks.GetPBlock(round) -> Skip || a34!pendingBlocks.GetPBlock(round) -> Skip) []
+	[leaderNum == 4] (a40!pendingBlocks.GetPBlock(round) -> Skip || a41!pendingBlocks.GetPBlock(round) -> Skip || a42!pendingBlocks.GetPBlock(round) -> Skip || a43!pendingBlocks.GetPBlock(round) -> Skip) 		
+	)
+	||
+	(
+	[leaderNum == 0] (a01?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a02?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a03?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a04?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip)  // receives from other nodes
+	[]
+	[leaderNum == 1] (a10?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a12?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a13?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a14?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip) 
+	[]
+	[leaderNum == 2] (a20?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a21?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a23?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a24?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip)
+	[]
+	[leaderNum == 3] (a30?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a31?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a32?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a34?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip)
+	[]
+	[leaderNum == 4] (a40?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a41?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a42?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip [] a43?y -> {pendingBlocks.SetPBlock(round, y)} -> Skip)
+	));
+
+var<BVote> bVote;
+
+BlockVoting() = 
+	[round == 0 || round == 1 || round == 2 || round == 3 || round == 4] propose_broadcast_end -> BVoting(); 
+	
+var<PendingBlock> tempPBlock;
+var<Block> invalid0;
+var<Block> invalid1;
+var<Block> invalid2;
+var<Block> invalid3;
+var<Block> invalid4;
+var<Block> tempCBlock;
+var<Blockchain> bchain0;
+var<Blockchain> bchain1;
+var<Blockchain> bchain2;
+var<Blockchain> bchain3;
+var<Blockchain> bchain4;
+
+var node = round;
+var bsig = new BSig(node);
+
+var votingMode[maxNodes];
+#define Valid_Block 0;
+#define Invalid_Block 1;
+#define Donot_Vote 2;
+var voteCount; 
+var ivoteCount;
+var vMalBehavior = false;
+var delay;
+				
+BVoting() = 
+	voteb.round {
+		tempPBlock = pendingBlocks.GetPBlock(round);
+		tempCBlock = tempPBlock.GetBlock();		
+		if (bchain0.IncludesBlock(tempCBlock) || bchain1.IncludesBlock(tempCBlock) || bchain2.IncludesBlock(tempCBlock) ||
+			bchain3.IncludesBlock(tempCBlock) || bchain4.IncludesBlock(tempCBlock)){
+			lMalBehavior = true;
+			}
+		
+		var i = 0;
+		while(i < tValidators.GetLength()){
+			tv = tValidators.GetNode(i); tv.IncNumBVAttempts(1);
+			i++;
+			}
+	
+		if(votingMode[0] == Valid_Block) {tempCBlock = tempPBlock.GetBlock(); bVote = new BVote(tempCBlock.GetBlockHash(), bsig, 1); voteCount++;}
+		else if(votingMode[0] == Invalid_Block) {	
+			if (round >= 1){
+				invalid0 = bchain0.GetRandomBlock(bchain0.RandomNumber(0, bchain0.GetHeight()));
+			}
+			else { invalid0 = tempCBlock;} 
+			bVote = new BVote(invalid0.GetBlockHash(), bsig, 1); 
+			vMalBehavior = true; ivoteCount++;
+			}
+		else if(votingMode[0] == Donot_Vote) {delay = delay++; vMalBehavior = true;} 														
+		
+		if(votingMode[1] == Valid_Block) {tempCBlock = tempPBlock.GetBlock(); bVote = new BVote(tempCBlock.GetBlockHash(), bsig, 1); voteCount++; }
+		else if(votingMode[1] == Invalid_Block) {
+			if (round >= 1){
+				invalid1 = bchain1.GetRandomBlock(bchain1.RandomNumber(0, bchain1.GetHeight()));
+			}
+			else { invalid1 = tempCBlock;}  
+			bVote = new BVote(invalid1.GetBlockHash(), bsig, 1); vMalBehavior = true; ivoteCount++;
+			}
+		else if(votingMode[1] == Donot_Vote) {delay = delay++; vMalBehavior = true;} 														
+		
+		if(votingMode[2] == Valid_Block) {tempCBlock = tempPBlock.GetBlock(); bVote = new BVote(tempCBlock.GetBlockHash(), bsig, 1); voteCount++; }
+		else if(votingMode[2] == Invalid_Block) {
+			if (round >= 1){
+				invalid2 = bchain2.GetRandomBlock(bchain2.RandomNumber(0, bchain2.GetHeight()));
+			}
+			else { invalid2 = tempCBlock;} 
+		bVote = new BVote(invalid2.GetBlockHash(), bsig, 1); vMalBehavior = true; ivoteCount++;
+		}
+		else if(votingMode[2] == Donot_Vote) {delay = delay++; vMalBehavior = true;} 														
+		
+		if(votingMode[3] == Valid_Block) {tempCBlock = tempPBlock.GetBlock(); bVote = new BVote(tempCBlock.GetBlockHash(), bsig, 1); voteCount++; 
+		}
+		else if(votingMode[3] == Invalid_Block) {
+		if (round >= 1){
+				invalid3 = bchain3.GetRandomBlock(bchain3.RandomNumber(0, bchain3.GetHeight()));
+			}
+			else { invalid3 = tempCBlock;} 
+		bVote = new BVote(invalid3.GetBlockHash(), bsig, 1); vMalBehavior = true; ivoteCount++;
+		}
+		else if(votingMode[3] == Donot_Vote) {delay = delay++; vMalBehavior = true;} 													
+		
+		if(votingMode[3] == Valid_Block) {tempCBlock = tempPBlock.GetBlock(); bVote = new BVote(tempCBlock.GetBlockHash(), bsig, 1); voteCount++; 
+		}
+		else if(votingMode[4] == Invalid_Block) {
+		if (round >= 1){
+				invalid4 = bchain4.GetRandomBlock(bchain4.RandomNumber(0, bchain4.GetHeight()));
+			}
+			else { invalid4 = tempCBlock;} 
+		bVote = new BVote(invalid4.GetBlockHash(), bsig, 1); vMalBehavior = true; ivoteCount++;
+		}
+		else if(votingMode[4] == Donot_Vote) {delay = delay++; vMalBehavior = true;} 														
+	}  -> Skip;
+
+var<Block> currentBlock;
+var validBChain = true;
+
+CheckValidity() = validBlockchain.round{
+			var i = bchain.GetHeight();
+			while (i >= 1 && validBChain == true){
+					currentBlock = bchain.GetBlock(i);
+					previousBlock = bchain.GetBlock(i-1);
+					if (currentBlock.GetBlockHash() != currentBlock.calculateBHash()){
+						validBChain = false;	
+						i--;
+					}
+					if (currentBlock.GetPrevHash() != previousBlock.calculateBHash()){ 
+						validBChain = false;
+						i--;
+					}
+					else if (currentBlock.GetBlockHash() == currentBlock.calculateBHash() && currentBlock.GetPrevHash() == previousBlock.GetBlockHash()){  
+						validBChain = true;
+						i--;
+					}
+			}
+} -> Skip;
+
+#define MajValidators 4;
+#define MinValidators 1;
+var validBCount0 = 0;
+var validBCount1 = 0;
+var validBCount2 = 0;
+var validBCount3 = 0;
+var validBCount4 = 0;
+var invalidBCount0 = 0;
+var invalidBCount1 = 0;
+var invalidBCount2 = 0;
+var invalidBCount3 = 0;
+var invalidBCount4 = 0;
+var blockchainHeight[maxRounds+1];
+
+BlockAddition() = 
+baddtion.round {
+		if (voteCount >= MajValidators){
+			bchain0.AddBlock(tempCBlock); validBCount0++;
+			bchain1.AddBlock(tempCBlock); validBCount1++;
+			bchain2.AddBlock(tempCBlock); validBCount2++;
+			bchain3.AddBlock(tempCBlock); validBCount3++;
+			bchain4.AddBlock(tempCBlock); validBCount4++;
+			blockchainHeight[round] = blockIndex;
+		}
+		else if(ivoteCount > MinValidators) {
+			bchain0.AddBlock(invalid0); invalidBCount0++; 
+			bchain1.AddBlock(invalid1); invalidBCount1++;
+			bchain2.AddBlock(invalid2); invalidBCount2++;
+			bchain3.AddBlock(invalid3); invalidBCount3++;
+			bchain4.AddBlock(invalid4); invalidBCount4++;
+			blockchainHeight[round] = blockIndex;
+		}
+		
+	} -> Skip;								  
+
+AssigningBRewardandIncTrust() = [bchain0.IncludesBlock(tempCBlock) || bchain1.IncludesBlock(tempCBlock) || bchain2.IncludesBlock(tempCBlock) ||
+									  bchain3.IncludesBlock(tempCBlock) || bchain4.IncludesBlock(tempCBlock) && lMalBehavior == false && vMalBehavior == false]
+									  AssignBGReward(rEscrow/shares); LGetEAmount(lEscrow); IncLNumBProposed(1); IncMWaitingTime(1); 
+									  AssignBVReward(); TVGetEAmount(); IncTVNumBValidated(1); IncVWaitingTime(1) []
+									  [(!(bchain0.IncludesBlock(tempCBlock)) || !(bchain1.IncludesBlock(tempCBlock)) || !(bchain2.IncludesBlock(tempCBlock)) ||
+									  !(bchain3.IncludesBlock(tempCBlock)) || !(bchain4.IncludesBlock(tempCBlock))) && 
+									   (lMalBehavior == false)] IncLFailures() [] 
+									  [(!(bchain0.IncludesBlock(tempCBlock)) || !(bchain1.IncludesBlock(tempCBlock)) || !(bchain2.IncludesBlock(tempCBlock)) ||
+									  !(bchain3.IncludesBlock(tempCBlock)) || !(bchain4.IncludesBlock(tempCBlock))) && 
+									   (vMalBehavior == false)] IncVFailures() []
+									  [(!(bchain0.IncludesBlock(tempCBlock)) || !(bchain1.IncludesBlock(tempCBlock)) || !(bchain2.IncludesBlock(tempCBlock)) ||
+									  !(bchain3.IncludesBlock(tempCBlock)) || !(bchain4.IncludesBlock(tempCBlock))) && 
+									   (lMalBehavior == true)] LPunishment() []
+									  [(!(bchain0.IncludesBlock(tempCBlock)) || !(bchain1.IncludesBlock(tempCBlock)) || !(bchain2.IncludesBlock(tempCBlock)) ||
+									  !(bchain3.IncludesBlock(tempCBlock)) || !(bchain4.IncludesBlock(tempCBlock))) && 
+									   (vMalBehavior == true)] 
+									    VPunishment();
+									  
+									  
+AssignBGReward(rew) = greward {bchain.RemoveEAmount(rew); leader.AddAmount(rew)} -> Skip;
+LGetEAmount(le) = eamount {bchain.RemoveEAmount(le); leader.AddAmount(le)} -> Skip;
+IncLNumBProposed(nb) = inbproposed {leader.IncNumBProposed(nb)} -> Skip;
+
+IncMWaitingTime(w) = iwtime.w {
+						var i = 0;
+						while(i < bManagementNodes.GetLength()-1){
+							bm1 = bManagementNodes.GetNode(i);
+							if (bm1 != leader){
+							    bm1.IncWaitingTime(w);
+							}
+							i++;
+					}
+					} -> Skip;
+AssignBVReward() = vreward {
+					var i = 0;
+					while(i < tValidators.GetLength()-1) {
+						tv = tValidators.GetNode(i);
+						bchain.RemoveEAmount((rEscrow/shares)/tValidators.GetLength()); 
+						tv.AddAmount((rEscrow/shares)/tValidators.GetLength());
+						i++;
+					}
+					} -> Skip; 
+					
+TVGetEAmount() = veamount {
+					var i = 0;
+					while(i < tValidators.GetLength()-1) {
+						tv = tValidators.GetNode(i);
+						vEscrow = tv.GetVEscrow();
+						bchain.RemoveEAmount(vEscrow); 
+						tv.AddAmount(vEscrow);
+						i++;
+					}
+					} -> Skip; 
+					
+IncTVNumBValidated(v) = ivnbvalidated.v {
+					var i = 0;
+					while(i < tValidators.GetLength()-1) {
+						tv = tValidators.GetNode(i);
+						tv.IncNumBValidated(v);
+						i++;
+					}
+					} -> Skip; 
+				
+IncVWaitingTime(w) = ivwtime.w {
+				var i = 0;
+				while(i < validatorNodes.GetLength()) {
+					v1 = validatorNodes.GetNode(i);
+					v1.IncWaitingTime(w);
+					i++;
+				} 
+				} -> Skip;
+
+IncLFailures() = ilfailures {
+				leader.IncNumFailures(1);
+				} -> Skip; 
+				
+IncVFailures() = ivfailures {
+					 var i = 0;
+					 while(i < tValidators.GetLength()-1){
+							tv = tValidators.GetNode(i);
+							tv.IncNumFailures(1);
+							i++;
+						}
+					} -> Skip;
+					
+LPunishment() = lpunish {
+				leader.SetMDeposit(0); leader.SetNumBProposed(0); 
+				leader.SetNumFailures(0); leader.SetWaitingTime(0);
+				} -> Skip;
+				
+VPunishment() = vpunish { 
+				var i = 0;
+				while(i < tValidators.GetLength()-1) {
+					tv = tValidators.GetNode(i);
+					tv.SetVDeposit(0); tv.SetNumBValidated(0); 
+					tv.SetNumFailures(0); tv.SetWaitingTime(0);
+					i++;
+					}
+					} -> Skip; 
+
+				
+#define maxRounds 4;
+#define maxNodes 5;
+var leaderNum = 0;
+NextRound() = 
+	[round < maxRounds] nextround {
+		round++;
+		voteCount = 0;
+		ivoteCount = 0;
+		leaderNum = (leaderNum+1) % maxNodes;
+		bVote.Clear();
+		blockIndex++;
+		delay = 0;
+	} -> TBCConsensus1()
+	[]
+	[round >= maxRounds] Skip;
+
+TBCConsensus1() = CreateTransactions(); LVSelection(); TransactionsVoting(u); ProposeAndBroadcast(); BlockVoting(); CheckValidity(); BlockAddition(); AssigningBRewardandIncTrust(); NextRound();	
+
+InjectMaliciousNodes(nodes, mode) = {
+	var i = 0; var j = 0;
+	while (i < nodes) {
+		if(j != leader.GetRound()) {
+			votingMode[j] = mode;
+			i++;
+		}
+		j = (j + 1) % maxNodes;
+	} 
+} -> Skip;
+
+#define Minority 1;
+#define Half 3;
+#define Majority 4;
+
+TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() = InjectMaliciousNodes(Minority, Valid_Block); TBCConsensus();
+TBCConsensus_With_Half_Malicious_Vote_Valid_Block() = InjectMaliciousNodes(Half, Valid_Block); TBCConsensus();
+TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() = InjectMaliciousNodes(Majority, Valid_Block); TBCConsensus();
+
+TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() = InjectMaliciousNodes(Minority, Invalid_Block); TBCConsensus();
+TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() = InjectMaliciousNodes(Half, Invalid_Block); TBCConsensus();
+TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() = InjectMaliciousNodes(Majority, Invalid_Block); TBCConsensus();
+
+TBCConsensus_With_Minority_Malicious_Donot_Vote() = InjectMaliciousNodes(Minority, Donot_Vote); TBCConsensus();
+TBCConsensus_With_Half_Malicious_Donot_Vote() = InjectMaliciousNodes(Half, Donot_Vote); TBCConsensus();
+TBCConsensus_With_Majority_Malicious_Donot_Vote() = InjectMaliciousNodes(Majority, Donot_Vote); TBCConsensus();
+
+#assert TBCConsensus() deadlockfree;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() deadlockfree;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block deadlockfree;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() deadlockfree;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() deadlockfree;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block deadlockfree;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() deadlockfree; 
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() deadlockfree;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() deadlockfree;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() deadlockfree;
+
+
+
+#define Consensus (!bchain0.IsEmpty() && bchain0.GetHeadBlock() == bchain1.GetHeadBlock() && bchain1.GetHeadBlock() == bchain2.GetHeadBlock() && bchain2.GetHeadBlock() == bchain3.GetHeadBlock() && bchain3.GetHeadBlock() == bchain4.GetHeadBlock());
+
+#assert TBCConsensus() |= <> Consensus;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() |= <> Consensus;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block() |= <> Consensus;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() |= <> Consensus;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() |= <> Consensus;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() |= <> Consensus;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() |= <> Consensus; 
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() |= <> Consensus;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() |= <> Consensus;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() |= <> Consensus;
+
+#define Persistence (round > 0 && (bchain0 == bchain1 && bchain1 == bchain2 && bchain2 == bchain3 && bchain3 == bchain4));
+					
+#assert TBCConsensus() |= <> Persistence; 
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() |= <> Persistence;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block() |= <> Persistence;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() |= <> Persistence;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() |= <> Persistence;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() |= <> Persistence;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() |= <> Persistence;
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() |= <> Persistence;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() |= <> Persistence;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() |= <> Persistence;
+
+#define ImmuneToInvalidBlock Persistence; 
+
+#assert TBCConsensus() |= <> ImmuneToInvalidBlock;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() |= <> ImmuneToInvalidBlock;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block() |= <> ImmuneToInvalidBlock;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() |= <> ImmuneToInvalidBlock;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() |= <> ImmuneToInvalidBlock;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() |= <> ImmuneToInvalidBlock;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() |= <> ImmuneToInvalidBlock;
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() |= <> ImmuneToInvalidBlock;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() |= <> ImmuneToInvalidBlock;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() |= <> ImmuneToInvalidBlock;
+
+#define boundedDelay 1;
+#define ChainGrowth (round > 0 && delay <= boundedDelay && (blockchainHeight[0] < blockchainHeight[1] && blockchainHeight[1] < blockchainHeight[2] && blockchainHeight[2] < blockchainHeight[3] && blockchainHeight[3] < blockchainHeight[4]));
+
+#assert TBCConsensus() |= <> ChainGrowth; 
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() |= <> ChainGrowth;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block() |= <> ChainGrowth;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() |= <> ChainGrowth;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() |= <> ChainGrowth;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() |= <> ChainGrowth;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() |= <> ChainGrowth;
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() |= <> ChainGrowth;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() |= <> ChainGrowth;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() |= <> ChainGrowth;
+
+
+
+#define ChainQuality (round > 0 && (validBCount0 > invalidBCount0 && validBCount1 > invalidBCount1 && validBCount2 > invalidBCount2 && validBCount3 > invalidBCount3 && validBCount4 > invalidBCount4)); 
+
+                      
+#assert TBCConsensus() |= <> ChainQuality; 
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() |= <> ChainQuality;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block() |= <> ChainQuality;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() |= <> ChainQuality;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() |= <> ChainQuality;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() |= <> ChainQuality;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() |= <> ChainQuality;
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() |= <> ChainQuality;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() |= <> ChainQuality;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() |= <> ChainQuality;
+
+
+#define Liveness ChainQuality && ChainGrowth;
+
+#assert TBCConsensus() |= <> Liveness;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() |= <> Liveness;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block() |= <> Liveness;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() |= <> Liveness;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() |= <> Liveness;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() |= <> Liveness;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() |= <> Liveness;
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() |= <> Liveness;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() |= <> Liveness;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() |= <> Liveness;
+
+#define ImmuneToConsensusDelay Liveness;
+
+#assert TBCConsensus() |= <> ImmuneToConsensusDelay;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Valid_Block() |= <> ImmuneToConsensusDelay;
+#assert TBCConsensus_With_Half_Malicious_Vote_Valid_Block() |= <> ImmuneToConsensusDelay;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Valid_Block() |= <> ImmuneToConsensusDelay;
+
+#assert TBCConsensus_With_Minority_Malicious_Vote_Invalid_Block() |= <> ImmuneToConsensusDelay;
+#assert TBCConsensus_With_Half_Malicious_Vote_Invalid_Block() |= <> ImmuneToConsensusDelay;
+#assert TBCConsensus_With_Majority_Malicious_Vote_Invalid_Block() |= <> ImmuneToConsensusDelay;
+
+#assert TBCConsensus_With_Minority_Malicious_Donot_Vote() |= <> ImmuneToConsensusDelay;
+#assert TBCConsensus_With_Half_Malicious_Donot_Vote() |= <> ImmuneToConsensusDelay;
+#assert TBCConsensus_With_Majority_Malicious_Donot_Vote() |= <> ImmuneToConsensusDelay;
